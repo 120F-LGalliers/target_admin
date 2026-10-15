@@ -33,7 +33,9 @@ def build_demo(now: datetime | None = None, seed: int = 120):
     now = (now or datetime.now(timezone.utc)).replace(microsecond=0)
     activities, histories = [], {}
 
-    for i, name in enumerate(NAMES):
+    areas = ["Sales", "Service", "My Account", "Checkout", "Help"]
+    for i, base in enumerate(NAMES):
+        name = f"{areas[i % len(areas)]} - {base} (DEMO-{2000 + i * 7})" if i % 3 else base
         aid = 400000 + i * 37
         roll = rng.random()
         typ = "ab" if roll < 0.68 else "xt" if roll < 0.88 else rng.choice(["abt", "ab_aa"])
@@ -96,3 +98,27 @@ def build_demo(now: datetime | None = None, seed: int = 120):
         histories[str(aid)] = hist
 
     return activities, histories
+
+
+def build_demo_jira(activities, histories, seed: int = 7) -> dict:
+    """Fake Jira tickets for the demo activities. Statuses follow TM's
+    workflow: concluded tests get Winners / Losers / Inconclusive."""
+    import re
+    rng = random.Random(seed)
+    issues = {}
+    for i, act in enumerate(activities):
+        name = act["name"]
+        m = re.search(r"\((DEMO-\d+)\)", name)
+        if i % 11 == 5:
+            continue  # leave a few without a ticket to show the "No Jira ticket" case
+        key = m.group(1) if m else f"DEMO-{9000 + i}"
+        summary = re.sub(r"\s*\(DEMO-\d+\)", "", name)
+        if act["state"] in ("deactivated", "archived") or act.get("endsAt"):
+            status = rng.choices(["Winners", "Losers", "Inconclusive", "Delivery / Reporting"], [4, 2, 3, 2])[0]
+        elif act["state"] == "approved":
+            status = "Run"
+        else:
+            status = "To Do"
+        issues[key] = {"key": key, "summary": summary, "status": status, "status_category": None,
+                       "url": f"https://example.atlassian.net/browse/{key}"}
+    return issues

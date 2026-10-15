@@ -13,7 +13,8 @@ import pandas as pd
 import streamlit as st
 
 from timeline.calendar_view import build_calendar
-from timeline.demo import build_demo
+from timeline.demo import build_demo, build_demo_jira
+from timeline.jira_api import JiraClient, JiraConfig, NO_OUTCOME, NOT_MATCHED
 from timeline.lifecycle import in_range
 from timeline.store import Store
 from timeline.target_api import TargetClient, TargetConfig
@@ -120,15 +121,32 @@ def _client() -> TargetClient:
     return TargetClient(cfg)
 
 
+HAS_JIRA = bool(_secret("jira", "site") and _secret("jira", "email") and _secret("jira", "api_token"))
+
+
+def _jira_client() -> JiraClient:
+    cfg = JiraConfig(site=_secret("jira", "site"), email=_secret("jira", "email"),
+                     api_token=_secret("jira", "api_token"))
+    if _secret("jira", "jql"):
+        cfg.jql = _secret("jira", "jql")
+    if _secret("jira", "projects"):
+        cfg.projects = list(_secret("jira", "projects"))
+    return JiraClient(cfg)
+
+
 def refresh(store: Store) -> dict:
     with _refresh_lock():
         if DEMO_MODE:
             acts, hists = build_demo()
-            return store.refresh(lambda: acts, lambda aid: hists[aid])
+            return store.refresh(lambda: acts, lambda aid: hists[aid],
+                                 jira_fn=lambda names: build_demo_jira(acts, hists), jira_projects=["DEMO"])
         client = _client()
+        jira = _jira_client() if HAS_JIRA else None
         bar = st.progress(0.0, text="Fetching activities from Adobe Target")
         result = store.refresh(client.list_activities, client.activity_history,
-                               progress=lambda p, msg: bar.progress(p, text=msg))
+                               progress=lambda p, msg: bar.progress(p, text=msg),
+                               jira_fn=jira.fetch if jira else None,
+                               jira_projects=jira.cfg.projects if jira else None)
         bar.empty()
         return result
 
@@ -141,12 +159,17 @@ if age is None or age > REFRESH_HOURS:
     with st.spinner("Refreshing data from Adobe Target"):
         try:
             res = refresh(store)
+            if res.get("jira_error"):
+                st.warning(f"Jira outcomes could not be refreshed: {res['jira_error']}")
             if res.get("errors"):
                 st.warning(f"History could not be fetched for {len(res['errors'])} activities. Their dates may be incomplete.")
         except Exception as exc:
             st.error(f"Refresh failed: {exc}")
 
 df = store.lifecycle_frame()
+JIRA_ON = store.jira_enabled
+if store.data.get("jira_error"):
+    st.warning(f"Jira outcomes could not be refreshed, so they may be out of date: {store.data['jira_error']}")
 
 # --------------------------------------------------------------------------
 # Header
@@ -221,6 +244,13 @@ view = df[df["type"].isin(types)]
 if search:
     view = view[view["name"].str.contains(search, case=False, na=False)]
 
+OUTCOME_ORDER = ["Winner", "Loser", "Inconclusive", "Descoped", NO_OUTCOME, NOT_MATCHED]
+if JIRA_ON:
+    present = [o for o in OUTCOME_ORDER if o in set(df["outcome"])]
+    outcomes = st.multiselect("Outcome (from Jira)", present, default=present, key="outcome-filter",
+                              help="Taken from the Jira ticket's status: Winners, Losers, Inconclusive or Descoped.")
+    view = view[view["outcome"].isin(outcomes)]
+
 started = view[view["last_activated_at"].apply(lambda t: in_range(t, range_start, range_end))]
 first_live = view[view["first_live_at"].apply(lambda t: in_range(t, range_start, range_end))]
 concluded = view[view["concluded_at"].apply(lambda t: in_range(t, range_start, range_end))]
@@ -231,12 +261,21 @@ live_now = view[view["status"] == "Live"]
 # --------------------------------------------------------------------------
 
 period_txt = f"{start_d:%d %b} to {end_d:%d %b %Y}"
+concluded_hint = "Deactivated, archived or end date passed"
+if JIRA_ON and len(concluded):
+    oc = concluded["outcome"].value_counts()
+    parts = [f"{oc.get(o, 0)} {lbl}" for o, lbl in
+             (("Winner", "won"), ("Loser", "lost"), ("Inconclusive", "inconclusive")) if oc.get(o, 0)]
+    pending = len(concluded) - sum(oc.get(o, 0) for o in ("Winner", "Loser", "Inconclusive"))
+    if pending:
+        parts.append(f"{pending} awaiting outcome")
+    concluded_hint = " · ".join(parts) or concluded_hint
 st.markdown(
     f"""
 <div class="tt-kpis">
   <div class="tt-kpi accent"><div class="label">Started</div><div class="value">{len(started)}</div><div class="hint">Last activated, {period_txt}</div></div>
   <div class="tt-kpi"><div class="label">First went live</div><div class="value">{len(first_live)}</div><div class="hint">First ever go-live in period</div></div>
-  <div class="tt-kpi"><div class="label">Concluded</div><div class="value">{len(concluded)}</div><div class="hint">Deactivated, archived or end date passed</div></div>
+  <div class="tt-kpi"><div class="label">Concluded</div><div class="value">{len(concluded)}</div><div class="hint">{concluded_hint}</div></div>
   <div class="tt-kpi"><div class="label">Live now</div><div class="value">{len(live_now)}</div><div class="hint">Running today</div></div>
 </div>
 """,
@@ -255,10 +294,12 @@ def _fmt(frame: pd.DataFrame, sort_col: str) -> pd.DataFrame:
     for col in ("last_activated_at", "first_live_at", "concluded_at", "scheduled_start", "scheduled_end"):
         out[col] = out[col].dt.tz_convert(TZ).dt.tz_localize(None)
     out = out.sort_values(sort_col, ascending=False, na_position="last")
-    return out[[
-        "name", "type", "status", "last_activated_at", "first_live_at", "concluded_at",
-        "days_live", "live_periods", "activity_id", "date_source", "notes",
-    ]]
+    cols = ["name", "type", "status"]
+    if JIRA_ON:
+        cols += ["outcome", "jira_url"]
+    cols += ["last_activated_at", "first_live_at", "concluded_at",
+             "days_live", "live_periods", "activity_id", "date_source", "notes"]
+    return out[cols]
 
 
 COLUMNS = {
@@ -273,6 +314,8 @@ COLUMNS = {
     "activity_id": st.column_config.TextColumn("Activity ID"),
     "date_source": st.column_config.TextColumn("Date source", help="Change log is exact. Schedule only means no state history was found."),
     "notes": st.column_config.TextColumn("Notes"),
+    "outcome": st.column_config.TextColumn("Outcome", help="From the Jira ticket status"),
+    "jira_url": st.column_config.LinkColumn("Jira", display_text=r"/browse/(.*)$"),
 }
 
 
@@ -290,14 +333,17 @@ def table(frame: pd.DataFrame, sort_col: str, key: str, empty_msg: str):
 periods = store.periods_frame()
 if not periods.empty:
     periods = periods[periods["activity_id"].isin(view["activity_id"])]
+    periods = periods.merge(df[["activity_id", "outcome"]], on="activity_id", how="left")
 
 tc, t1, t2, t3, t4 = st.tabs([
     "Calendar", f"Started ({len(started)})", f"First went live ({len(first_live)})",
     f"Concluded ({len(concluded)})", f"All tests ({len(view)})",
 ])
 with tc:
-    colour_by = st.radio("Colour bars by", ["Status", "Type"], horizontal=True, key="cal-colour",
-                         help="Status shows what is live now in orange. Type separates A/B, XT and others.")
+    colour_by = st.radio("Colour bars by", ["Status", "Type"] + (["Outcome"] if JIRA_ON else []),
+                         horizontal=True, key="cal-colour",
+                         help="Status shows what is live now in orange. Type separates A/B, XT and others. "
+                              "Outcome uses the Jira ticket status.")
     sections = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ, colour_by=colour_by)
     if not sections:
         st.info("No tests were live during this period.")
@@ -344,6 +390,8 @@ with st.expander("Can't find a test?"):
             act = rec["activity"]
             st.markdown(f"**{row['name']}** · {row['type']} · ID {aid}")
             reasons = []
+            if JIRA_ON and row["outcome"] not in outcomes:
+                reasons.append(f"its outcome ({row['outcome']}) is not selected in the Outcome filter")
             if row["type"] not in types:
                 reasons.append(f"its type ({row['type']}) is not selected in Activity types")
             if pd.isna(row["last_activated_at"]):
@@ -361,6 +409,8 @@ with st.expander("Can't find a test?"):
                 "Last modified": act.get("modifiedAt"), "Last activated": fmt(row["last_activated_at"]),
                 "First went live": fmt(row["first_live_at"]), "Concluded": fmt(row["concluded_at"]),
                 "Date source": row["date_source"], "Notes": row["notes"],
+                **({"Jira ticket": row["jira_key"] or "Not found", "Jira status": row["jira_status"],
+                    "Outcome": row["outcome"], "Matched by": row["jira_match"]} if JIRA_ON else {}),
             })
             hist = rec.get("history") or []
             if rec.get("error"):

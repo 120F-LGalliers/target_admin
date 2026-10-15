@@ -42,6 +42,15 @@ With no credentials it runs on made-up demo data, with a banner saying so.
 3. **Scopes.** The default OAuth scopes match a standard Target S2S credential. Copy the exact list from the Developer Console project if login fails.
 4. **Type codes.** Auto-Target and others are labelled from the API's `type` value. Check the labels look right on real data.
 
+## Test outcomes from Jira
+
+On each refresh the app also reads TM's Jira and matches every Target activity to its ticket:
+
+1. **Key in the activity name.** Most names end with the ticket key, e.g. `... Authenticated (EAOA-3006)`.
+2. **Name.** Otherwise, the activity name is matched to a ticket summary in the `jql` filter (case and spacing ignored).
+
+The outcome is the ticket's status: `Winners` -> Winner, `Losers` -> Loser, `Inconclusive`, `Descoped`. Any other status shows as "No outcome yet"; no match shows as "No Jira ticket". Add a `[jira]` section to the secrets to turn this on.
+
 ## Tests
 
 ```bash

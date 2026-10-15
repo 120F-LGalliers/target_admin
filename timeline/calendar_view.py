@@ -27,6 +27,17 @@ TYPE_COLOURS = {
 }
 OTHER_COLOUR = "#8E8278"
 
+# Colour by outcome (from Jira). Inconclusive is deliberately neutral grey.
+# Every row also states its outcome in text, so colour is never the only cue.
+OUTCOME_COLOURS = {
+    "Winner": "#1E8A5E",
+    "Loser": "#C2381E",
+    "Inconclusive": "#8E8278",
+    "Descoped": "#C9C0B7",
+    "No outcome yet": "#E2C7A8",
+    "No Jira ticket": "#E4DDD4",
+}
+
 INK = "#1F1813"
 INK_MUTED = "#6C5F54"
 GRID = "#EFEAE3"
@@ -90,12 +101,22 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
         return []
 
     # Per-test summary: drives sections, ordering and the right-hand date text
+    if "outcome" not in p.columns:
+        p["outcome"] = None
+    p["outcome"] = p["outcome"].fillna("")
     per = p.groupby("activity_id").agg(
         name=("name", "first"), type=("type", "first"), live=("ongoing", "any"),
-        first_start=("start", "min"), last_end=("end", "max"), n=("period", "count"))
-    per["dates"] = per.apply(
-        lambda r: f"{r['type']}  ·  {_fmt(r['first_start'], tz, False)} – "
-                  + ("now" if r["live"] else _fmt(r["last_end"], tz, False)), axis=1)
+        first_start=("start", "min"), last_end=("end", "max"), n=("period", "count"),
+        outcome=("outcome", "first"))
+    show_outcome = colour_by == "Outcome" or per["outcome"].isin(["Winner", "Loser", "Inconclusive", "Descoped"]).any()
+
+    def _right_text(r):
+        text = f"{r['type']}  ·  {_fmt(r['first_start'], tz, False)} – " + (
+            "now" if r["live"] else _fmt(r["last_end"], tz, False))
+        if show_outcome and r["outcome"] in ("Winner", "Loser", "Inconclusive", "Descoped"):
+            text += f"  ·  {r['outcome']}"
+        return text
+    per["dates"] = per.apply(_right_text, axis=1)
 
     # Gaps between consecutive live periods of the same test (stopped/paused)
     gaps = []
@@ -118,7 +139,12 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
     p["state_key"] = p["ongoing"].map({True: "Live now", False: "Ended"})
     p["type_key"] = p["type"].where(p["type"].isin(TYPE_COLOURS), "Other")
 
-    if colour_by == "Type":
+    if colour_by == "Outcome":
+        field = "outcome_key"
+        p["outcome_key"] = p["outcome"].where(p["outcome"].isin(OUTCOME_COLOURS), "No Jira ticket")
+        domain = [o for o in OUTCOME_COLOURS if o in set(p["outcome_key"])]
+        colours = [OUTCOME_COLOURS[o] for o in domain]
+    elif colour_by == "Type":
         field = "type_key"
         domain = [t for t in TYPE_COLOURS if t in set(p["type_key"])]
         if "Other" in set(p["type_key"]):
@@ -141,7 +167,7 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
         chart = _section_chart(
             p[p["activity_id"].isin(ids)], gaps[gaps["activity_id"].isin(ids)] if not gaps.empty else gaps,
             sec, ids, lo, hi, now_ts, tz, field, domain, colours, tick_values, tick_fmt,
-            show_legend=(colour_by == "Type"))
+            show_legend=(colour_by in ("Type", "Outcome")))
         out.append((f"{title} ({len(ids)})", chart))
     return out
 
@@ -189,6 +215,7 @@ def _section_chart(p, gaps, per, order, lo, hi, now_ts, tz, field, domain, colou
             tooltip=[alt.Tooltip("name:N", title="Test"), alt.Tooltip("type:N", title="Type"),
                      alt.Tooltip("live_from:N", title="Live from"), alt.Tooltip("live_to:N", title="Live to"),
                      alt.Tooltip("days:Q", title="Days live"), alt.Tooltip("period_label:N", title="Live period"),
+                     alt.Tooltip("outcome:N", title="Outcome"),
                      alt.Tooltip("activity_id:N", title="Activity ID")]))
 
     names = per.reset_index()

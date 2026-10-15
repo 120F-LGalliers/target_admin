@@ -18,6 +18,7 @@ from typing import Callable
 
 import pandas as pd
 
+from .jira_api import build_index, match_activity
 from .lifecycle import derive_lifecycle
 
 
@@ -53,7 +54,9 @@ class Store:
     def refresh(self, list_fn: Callable[[], list[dict]],
                 history_fn: Callable[[str], list[dict]],
                 progress: Callable[[float, str], None] | None = None,
-                workers: int = 4) -> dict:
+                workers: int = 4,
+                jira_fn: Callable[[list[str]], dict] | None = None,
+                jira_projects: list[str] | None = None) -> dict:
         """Pull the activity list, then change logs for new/changed activities."""
         activities = list_fn()
         cached = self.data.get("activities", {})
@@ -86,12 +89,33 @@ class Store:
                 if progress:
                     progress(done / max(len(todo), 1), f"Fetched history {done} of {len(todo)}")
 
+        # Jira outcomes. A Jira failure keeps the last good copy and never
+        # blocks the Target refresh.
+        jira, jira_error = self.data.get("jira"), None
+        if jira_fn is not None:
+            if progress:
+                progress(1.0, "Fetching outcomes from Jira")
+            try:
+                jira = jira_fn([str(a.get("name") or "") for a in activities])
+            except Exception as exc:
+                jira_error = str(exc)[:300]
+        else:
+            jira = None
+
         self.data = {
             "refreshed_at": datetime.now(timezone.utc).isoformat(),
             "activities": fresh,
+            "jira": jira,
+            "jira_projects": jira_projects,
+            "jira_error": jira_error,
         }
         self.save()
-        return {"activities": len(activities), "histories_fetched": len(todo), "errors": errors}
+        return {"activities": len(activities), "histories_fetched": len(todo), "errors": errors,
+                "jira_error": jira_error}
+
+    @property
+    def jira_enabled(self) -> bool:
+        return self.data.get("jira") is not None
 
     def lifecycles(self, now: datetime | None = None):
         for rec in self.data.get("activities", {}).values():
@@ -116,10 +140,19 @@ class Store:
 
     def lifecycle_frame(self, now: datetime | None = None) -> pd.DataFrame:
         rows = []
+        jira = self.data.get("jira")
+        index = build_index(jira) if jira else {}
+        projects = self.data.get("jira_projects")
         for rec, lc in self.lifecycles(now):
             if rec.get("error"):
                 lc.notes.append(f"History fetch failed: {rec['error'][:120]}")
-            rows.append(lc.as_row())
+            row = lc.as_row()
+            if jira is not None:
+                row.update(match_activity(lc.name, jira, index, projects))
+            else:
+                row.update({"jira_key": None, "jira_status": None, "jira_url": None,
+                            "outcome": None, "jira_match": None})
+            rows.append(row)
         df = pd.DataFrame(rows)
         if df.empty:
             return df
