@@ -171,26 +171,58 @@ def _action_state(entry: dict) -> str | None:
     return None
 
 
+NEW_VALUE_KEYS = {"changedvalue", "newvalue", "to", "after", "current", "value"}
+
+
+def unwrap(value: Any) -> Any:
+    """Target's change log records diffs, e.g.
+    "state": {"previousValue": "approved", "changedValue": "saved"}.
+    Return the new value; plain values pass through unchanged."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if str(k).lower() in NEW_VALUE_KEYS:
+                return v
+        return None
+    return value
+
+
 def entry_state(entry: dict) -> str | None:
-    """The state an entry records: an explicit action wins, then a snapshot state."""
+    """The state an entry moved into: an explicit action wins, then the
+    state field (a diff or a plain value)."""
     action = _action_state(entry)
     if action:
         return action
-    state = _dig(entry, "state")
+    state = unwrap(_dig(entry, "state"))
     return str(state).lower() if state else None
 
 
+def describe_state_change(entry: dict) -> str:
+    """Human-readable state change for the lookup panel, e.g. "approved -> saved"."""
+    raw = _dig(entry, "state")
+    if isinstance(raw, dict):
+        prev = next((v for k, v in raw.items() if str(k).lower() in {"previousvalue", "oldvalue", "from"}), None)
+        new = unwrap(raw)
+        return f"{prev} -> {new}" if prev else f"set to {new}"
+    action = _action_state(entry)
+    return action or (str(raw) if raw else "")
+
+
 def _state_events(changelog: Iterable[dict]) -> list[tuple[datetime, str, dict]]:
-    """Return (timestamp, state, snapshot) for each change log entry that
-    records a state or a state change, oldest first."""
+    """Return (timestamp, state, schedule) for each change log entry that
+    records a state change, oldest first. The schedule is the start/end dates
+    in force at that moment, rebuilt from schedule diffs along the way."""
+    timed = [(t, e) for e in (changelog or []) if (t := _entry_time(e)) is not None]
+    timed.sort(key=lambda x: x[0])
+    schedule: dict = {"startsAt": None, "endsAt": None}
     events = []
-    for entry in changelog or []:
-        ts = _entry_time(entry)
+    for ts, entry in timed:
+        for key in schedule:
+            raw = _dig(entry, key)
+            if raw is not None:
+                schedule[key] = unwrap(raw)
         state = entry_state(entry)
-        if ts is None or not state:
-            continue
-        events.append((ts, state, entry))
-    events.sort(key=lambda e: e[0])
+        if state:
+            events.append((ts, state, dict(schedule)))
     return events
 
 
@@ -251,6 +283,15 @@ def derive_lifecycle(activity: dict, changelog: list[dict] | None,
     modified_at = parse_ts(activity.get("modifiedAt"))
     if events and state and events[-1][1] != state and modified_at:
         events.append((max(modified_at, events[-1][0]), state, activity))
+
+    # Change logs only record a schedule when it changes. If none was seen,
+    # use the activity's current schedule for the most recent activation.
+    live_idx = [i for i, e in enumerate(events) if e[1] in LIVE_STATES]
+    if live_idx:
+        i = live_idx[-1]
+        ts_i, st_i, sch_i = events[i]
+        if not _dig(sch_i, "startsAt") and not _dig(sch_i, "endsAt") and (sched_start or sched_end):
+            events[i] = (ts_i, st_i, {"startsAt": activity.get("startsAt"), "endsAt": activity.get("endsAt")})
 
     if events:
         source = "Change log"
