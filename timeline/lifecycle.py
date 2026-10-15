@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+import re
 from typing import Any, Iterable
 
 LIVE_STATES = {"approved"}
@@ -51,8 +52,12 @@ def parse_ts(value: Any) -> datetime | None:
         # Epoch milliseconds
         return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
     text = str(value).strip()
+    if text.isdigit():
+        return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+    # "+0000" style offsets -> "+00:00" (older Pythons reject the short form)
+    text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
     try:
         dt = datetime.fromisoformat(text)
     except ValueError:
@@ -128,16 +133,63 @@ class Lifecycle:
 # Core logic
 # --------------------------------------------------------------------------
 
+TIME_KEYS = ("modifiedAt", "modifiedDate", "changedAt", "date", "timestamp", "time", "createdAt")
+ACTION_KEYS = ("action", "actionType", "changeType", "eventType", "event", "operation",
+               "activityAction", "type", "description", "message", "summary", "changeDescription")
+
+# Change log wording -> the state the activity moved into. Order matters:
+# "deactivated" contains "activated", so check it first.
+ACTION_PATTERNS = [
+    (re.compile(r"deactivat|inactiv|disabl"), "deactivated"),
+    (re.compile(r"archiv"), "archived"),
+    (re.compile(r"delet"), "deleted"),
+    (re.compile(r"paus"), "paused"),
+    (re.compile(r"activat|resum|approv|enabl|publish|launch"), "approved"),
+]
+
+
+def _entry_time(entry: dict) -> datetime | None:
+    for key in TIME_KEYS:
+        ts = parse_ts(_dig(entry, key))
+        if ts:
+            return ts
+    return None
+
+
+def _action_state(entry: dict) -> str | None:
+    """Read the state change from an action-style entry, e.g.
+    {"action": "ACTIVATED"} or "Deactivated the activity"."""
+    if not isinstance(entry, dict):
+        return None
+    for key in ACTION_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and value and value.lower() not in TYPE_LABELS:
+            text = value.lower()
+            for pattern, state in ACTION_PATTERNS:
+                if pattern.search(text):
+                    return state
+    return None
+
+
+def entry_state(entry: dict) -> str | None:
+    """The state an entry records: an explicit action wins, then a snapshot state."""
+    action = _action_state(entry)
+    if action:
+        return action
+    state = _dig(entry, "state")
+    return str(state).lower() if state else None
+
+
 def _state_events(changelog: Iterable[dict]) -> list[tuple[datetime, str, dict]]:
     """Return (timestamp, state, snapshot) for each change log entry that
-    records a state, oldest first."""
+    records a state or a state change, oldest first."""
     events = []
     for entry in changelog or []:
-        ts = parse_ts(_dig(entry, "modifiedAt"))
-        state = _dig(entry, "state")
+        ts = _entry_time(entry)
+        state = entry_state(entry)
         if ts is None or not state:
             continue
-        events.append((ts, str(state).lower(), entry))
+        events.append((ts, state, entry))
     events.sort(key=lambda e: e[0])
     return events
 
