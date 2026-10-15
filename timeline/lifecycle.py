@@ -62,14 +62,18 @@ def parse_ts(value: Any) -> datetime | None:
 
 def _dig(obj: Any, key: str) -> Any:
     """Find `key` in a change log entry, wherever Target nests it."""
-    if not isinstance(obj, dict):
-        return None
-    if key in obj:
-        return obj[key]
-    for nested in ("activityParameters", "activity", "parameters", "after", "current"):
-        inner = obj.get(nested)
-        if isinstance(inner, dict) and key in inner:
-            return inner[key]
+    # Breadth-first, so a top-level value wins over a nested one. Searches up
+    # to three levels deep (e.g. entry -> activityParameters -> activity).
+    level = [obj]
+    for _ in range(4):
+        nxt = []
+        for node in level:
+            if not isinstance(node, dict):
+                continue
+            if key in node and node[key] not in (None, ""):
+                return node[key]
+            nxt.extend(v for v in node.values() if isinstance(v, dict))
+        level = nxt
     return None
 
 
