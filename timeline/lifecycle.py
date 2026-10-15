@@ -111,9 +111,11 @@ class Lifecycle:
     live_periods: int
     date_source: str
     notes: list[str] = field(default_factory=list)
+    periods: list[LivePeriod] = field(default_factory=list)
 
     def as_row(self) -> dict:
         row = asdict(self)
+        row.pop("periods", None)
         row["notes"] = "; ".join(self.notes)
         return row
 
@@ -229,6 +231,7 @@ def derive_lifecycle(activity: dict, changelog: list[dict] | None,
         live_periods=len(periods),
         date_source=source,
         notes=notes,
+        periods=periods,
     )
 
 
