@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+from timeline.calendar_view import build_calendar
 from timeline.demo import build_demo
 from timeline.lifecycle import in_range
 from timeline.store import Store
@@ -26,16 +27,41 @@ st.set_page_config(page_title="TM Experiment Timeline", page_icon=str(APP_DIR / 
 
 def _secret(section: str, key: str, default=None):
     try:
-        return st.secrets[section][key]
-    except (KeyError, FileNotFoundError, AttributeError):
+        value = st.secrets[section][key]
+    except Exception:  # no secrets file, missing section or key
         return default
+    return value.strip() if isinstance(value, str) else value
+
+
+def _flag(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 TZ = ZoneInfo(_secret("app", "timezone", "Europe/London"))
 REFRESH_HOURS = float(_secret("app", "refresh_hours", 6))
 CACHE_PATH = APP_DIR / _secret("app", "cache_path", "data/cache.json")
-HAS_CREDS = bool(_secret("target", "client_id") and _secret("target", "client_secret") and _secret("target", "tenant"))
-DEMO_MODE = bool(_secret("app", "demo_mode", not HAS_CREDS))
+REQUIRED = ("tenant", "client_id", "client_secret")
+MISSING = [f"target.{k}" for k in REQUIRED if not _secret("target", k)]
+HAS_CREDS = not MISSING
+_demo_setting = _secret("app", "demo_mode")
+DEMO_MODE = _flag(_demo_setting) if _demo_setting is not None else not HAS_CREDS
+
+
+def _demo_reason() -> str:
+    """Explain why the app is in demo mode, without revealing any values."""
+    if _demo_setting is not None and _flag(_demo_setting):
+        return "<code>demo_mode</code> is set to true in the <code>[app]</code> secrets."
+    try:
+        sections = list(st.secrets.keys())
+    except Exception:
+        sections = []
+    if not sections:
+        return "No secrets were found. Add them in the app's Settings, under Secrets."
+    found = ", ".join(f"<code>[{s}]</code>" for s in sections) or "none"
+    missing = ", ".join(f"<code>{m}</code>" for m in MISSING)
+    return f"Missing or empty: {missing}. Top-level entries found: {found}. Check the keys sit under a <code>[target]</code> header."
 DEFAULT_TYPES = list(_secret("app", "default_types", ["A/B", "XT"]))
 
 # --------------------------------------------------------------------------
@@ -150,7 +176,7 @@ with right:
 
 if DEMO_MODE:
     st.markdown('<div class="tt-banner"><b>Demo data.</b> Every test name and date shown is made up. '
-                'Add Adobe credentials to <code>.streamlit/secrets.toml</code> to switch to live Target data.</div>',
+                f'Why: {_demo_reason()}</div>',
                 unsafe_allow_html=True)
 
 if df.empty:
@@ -261,10 +287,22 @@ def table(frame: pd.DataFrame, sort_col: str, key: str, empty_msg: str):
                        mime="text/csv", key=f"dl-{key}")
 
 
-t1, t2, t3, t4 = st.tabs([
-    f"Started ({len(started)})", f"First went live ({len(first_live)})",
+periods = store.periods_frame()
+if not periods.empty:
+    periods = periods[periods["activity_id"].isin(view["activity_id"])]
+
+tc, t1, t2, t3, t4 = st.tabs([
+    "Calendar", f"Started ({len(started)})", f"First went live ({len(first_live)})",
     f"Concluded ({len(concluded)})", f"All tests ({len(view)})",
 ])
+with tc:
+    chart = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ)
+    if chart is None:
+        st.info("No tests were live during this period.")
+    else:
+        st.caption("Each bar is a period when the test was live. A dotted line means it was stopped or paused, "
+                   "then relaunched. A dot marks where a test stopped. Hover for exact dates.")
+        st.altair_chart(chart, width="stretch")
 with t1:
     table(started, "last_activated_at", "started", "No tests were activated in this period.")
 with t2:
