@@ -296,13 +296,24 @@ tc, t1, t2, t3, t4 = st.tabs([
     f"Concluded ({len(concluded)})", f"All tests ({len(view)})",
 ])
 with tc:
-    chart = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ)
+    colour_by = st.radio("Colour bars by", ["Status", "Type"], horizontal=True, key="cal-colour",
+                         help="Status shows what is live now in orange. Type separates A/B, XT and others.")
+    chart = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ, colour_by=colour_by)
     if chart is None:
         st.info("No tests were live during this period.")
     else:
         st.caption("Each bar is a period when the test was live. A dotted line means it was stopped or paused, "
                    "then relaunched. A dot marks where a test stopped. Hover for exact dates.")
         st.altair_chart(chart, width="stretch")
+
+    # Tests that have been live but have no usable dates can't be drawn
+    placed = set(periods["activity_id"]) if not periods.empty else set()
+    unplaced = view[view["status"].isin(["Live", "Concluded", "Paused"]) & ~view["activity_id"].isin(placed)]
+    if not unplaced.empty:
+        st.warning(f"{len(unplaced)} test(s) have been live but have no go-live date, so they can't be shown "
+                   "on the calendar. Use \"Can't find a test?\" below to see why.")
+        st.dataframe(unplaced[["name", "type", "status", "activity_id", "notes"]], hide_index=True,
+                     width="stretch", column_config=COLUMNS)
 with t1:
     table(started, "last_activated_at", "started", "No tests were activated in this period.")
 with t2:
@@ -311,6 +322,55 @@ with t3:
     table(concluded, "concluded_at", "concluded", "No tests concluded in this period.")
 with t4:
     table(view, "last_activated_at", "all", "No tests match these filters.")
+
+with st.expander("Can't find a test?"):
+    st.caption("Searches everything pulled from Target, ignoring the date range and type filters.")
+    q = st.text_input("Test name or activity ID", key="lookup")
+    if q:
+        recs = store.data.get("activities", {})
+        hits = [(aid, r) for aid, r in recs.items()
+                if q.strip() == aid or q.lower() in str(r["activity"].get("name", "")).lower()]
+        if not hits:
+            seen = sorted({str(r["activity"].get("workspace") or "Default") for r in recs.values()})
+            st.error(f"No activity matching \"{q}\" came back from Target ({len(recs)} activities in total, "
+                     f"from workspaces: {', '.join(seen) or 'unknown'}). The most likely cause is that the test sits "
+                     "in a workspace the API credential can't see. Check its product profile in the Adobe Admin "
+                     "Console covers every Tesco Mobile workspace, then press Refresh now.")
+        for aid, rec in hits[:5]:
+            row = df[df["activity_id"] == aid].iloc[0]
+            act = rec["activity"]
+            st.markdown(f"**{row['name']}** · {row['type']} · ID {aid}")
+            reasons = []
+            if row["type"] not in types:
+                reasons.append(f"its type ({row['type']}) is not selected in Activity types")
+            if pd.isna(row["last_activated_at"]):
+                reasons.append("no go-live date could be worked out (see the change log below)")
+            elif not any(in_range(t, range_start, range_end) for t in
+                         (row["last_activated_at"], row["first_live_at"], row["concluded_at"])):
+                reasons.append("none of its dates fall in the selected period")
+            if reasons:
+                st.write("Not showing in the lists because " + "; ".join(reasons) + ".")
+            fmt = lambda t: "" if pd.isna(t) else t.tz_convert(TZ).strftime("%d %b %Y, %H:%M")
+            st.write({
+                "Current state in Target": act.get("state"), "Workspace": act.get("workspace"),
+                "Scheduled start": act.get("startsAt"), "Scheduled end": act.get("endsAt"),
+                "Last modified": act.get("modifiedAt"), "Last activated": fmt(row["last_activated_at"]),
+                "First went live": fmt(row["first_live_at"]), "Concluded": fmt(row["concluded_at"]),
+                "Date source": row["date_source"], "Notes": row["notes"],
+            })
+            hist = rec.get("history") or []
+            if rec.get("error"):
+                st.error(f"Change log fetch failed: {rec['error']}")
+            st.write(f"Change log: {len(hist)} entries")
+            if hist:
+                from timeline.lifecycle import _dig
+                st.dataframe(pd.DataFrame([{
+                    "modifiedAt": _dig(h, "modifiedAt"), "state": _dig(h, "state"),
+                    "startsAt": _dig(h, "startsAt"), "endsAt": _dig(h, "endsAt"),
+                } for h in hist]), hide_index=True, width="stretch")
+                st.caption("Raw first and last change log entries, to check the field names Target uses:")
+                st.json(hist[:1] + (hist[-1:] if len(hist) > 1 else []), expanded=False)
+            st.divider()
 
 with st.expander("How the dates are worked out"):
     st.markdown(
