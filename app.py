@@ -131,6 +131,8 @@ def _jira_client() -> JiraClient:
         cfg.jql = _secret("jira", "jql")
     if _secret("jira", "projects"):
         cfg.projects = list(_secret("jira", "projects"))
+    if _secret("jira", "end_date_field"):
+        cfg.end_date_field = _secret("jira", "end_date_field")
     return JiraClient(cfg)
 
 
@@ -291,12 +293,12 @@ def _fmt(frame: pd.DataFrame, sort_col: str) -> pd.DataFrame:
     now = pd.Timestamp.now(tz="UTC")
     end = out["concluded_at"].fillna(now)
     out["days_live"] = ((end - out["last_activated_at"]).dt.total_seconds() / 86400).round().astype("Int64")
-    for col in ("last_activated_at", "first_live_at", "concluded_at", "scheduled_start", "scheduled_end"):
+    for col in ("last_activated_at", "first_live_at", "concluded_at", "scheduled_start", "scheduled_end", "planned_end"):
         out[col] = out[col].dt.tz_convert(TZ).dt.tz_localize(None)
     out = out.sort_values(sort_col, ascending=False, na_position="last")
     cols = ["name", "type", "status"]
     if JIRA_ON:
-        cols += ["outcome", "jira_url"]
+        cols += ["outcome", "jira_url", "planned_end"]
     cols += ["last_activated_at", "first_live_at", "concluded_at",
              "days_live", "live_periods", "activity_id", "date_source", "notes"]
     return out[cols]
@@ -316,6 +318,8 @@ COLUMNS = {
     "notes": st.column_config.TextColumn("Notes"),
     "outcome": st.column_config.TextColumn("Outcome", help="From the Jira ticket status"),
     "jira_url": st.column_config.LinkColumn("Jira", display_text=r"/browse/(.*)$"),
+    "planned_end": st.column_config.DateColumn("Planned end (Jira)", format="DD MMM YYYY",
+                                               help="The End date field on the Jira ticket"),
 }
 
 
@@ -333,7 +337,7 @@ def table(frame: pd.DataFrame, sort_col: str, key: str, empty_msg: str):
 periods = store.periods_frame()
 if not periods.empty:
     periods = periods[periods["activity_id"].isin(view["activity_id"])]
-    periods = periods.merge(df[["activity_id", "outcome"]], on="activity_id", how="left")
+    periods = periods.merge(df[["activity_id", "outcome", "planned_end"]], on="activity_id", how="left")
 
 tc, t1, t2, t3, t4 = st.tabs([
     "Calendar", f"Started ({len(started)})", f"First went live ({len(first_live)})",
@@ -344,7 +348,11 @@ with tc:
                          horizontal=True, key="cal-colour",
                          help="Status shows what is live now in orange. Type separates A/B, XT and others. "
                               "Outcome uses the Jira ticket status.")
-    sections = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ, colour_by=colour_by)
+    show_planned = JIRA_ON and st.toggle(
+        "Show planned end dates from Jira", value=True, key="cal-planned",
+        help="Extends live tests to the End date on their Jira ticket, shown as a faint bar.")
+    sections = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ,
+                              colour_by=colour_by, show_planned=show_planned)
     if not sections:
         st.info("No tests were live during this period.")
     else:
@@ -410,7 +418,9 @@ with st.expander("Can't find a test?"):
                 "First went live": fmt(row["first_live_at"]), "Concluded": fmt(row["concluded_at"]),
                 "Date source": row["date_source"], "Notes": row["notes"],
                 **({"Jira ticket": row["jira_key"] or "Not found", "Jira status": row["jira_status"],
-                    "Outcome": row["outcome"], "Matched by": row["jira_match"]} if JIRA_ON else {}),
+                    "Outcome": row["outcome"], "Matched by": row["jira_match"],
+                    "Planned end (Jira)": fmt(row["planned_end"] - pd.Timedelta(hours=1)) if pd.notna(row["planned_end"]) else ""}
+                   if JIRA_ON else {}),
             })
             hist = rec.get("history") or []
             if rec.get("error"):
@@ -434,6 +444,7 @@ with st.expander("How the dates are worked out"):
 - **Concluded** is when the test was last deactivated or archived, or when its scheduled end date passed. Tests that are still live have no concluded date.
 - If a test was activated with a future start date, the scheduled start is used, because that is when it began serving.
 - Dates come from each activity's change log in Target. Where no state history exists, the scheduled dates are used and the *Date source* column says so.
+- **Planned end** comes from the End date field on the test's Jira ticket. On the calendar it shows as a faint bar from today to that date for tests that are still live.
 - All times are UK time.
 """
     )

@@ -41,6 +41,8 @@ class JiraConfig:
     # are always looked up directly, even if outside this filter.
     jql: str = "project = EAOA AND labels = 120Feet"
     projects: list[str] = field(default_factory=lambda: ["EAOA"])
+    # Jira's "End date" field on EAOA tickets (planned test end, e.g. "2026-09-30")
+    end_date_field: str = "customfield_12051"
     timeout: int = 30
 
 
@@ -56,7 +58,7 @@ class JiraClient:
     def _search(self, jql: str) -> list[dict]:
         out, token = [], None
         while True:
-            body = {"jql": jql, "fields": self.FIELDS, "maxResults": 100}
+            body = {"jql": jql, "fields": self.FIELDS + [self.cfg.end_date_field], "maxResults": 100}
             if token:
                 body["nextPageToken"] = token
             for attempt in range(4):
@@ -82,6 +84,7 @@ class JiraClient:
             "key": issue.get("key"),
             "summary": f.get("summary") or "",
             "status": status.get("name") or "",
+            "planned_end": f.get(self.cfg.end_date_field) or None,
             "status_category": (status.get("statusCategory") or {}).get("key"),
             "url": f"{self.base}/browse/{issue.get('key')}",
         }
@@ -145,11 +148,12 @@ def match_activity(name: str, issues: dict[str, dict], index: dict[str, list[str
         if len(hits) == 1:
             method, key = "Name", hits[0]
         elif len(hits) > 1:
-            return {"jira_key": None, "jira_status": None, "jira_url": None, "outcome": NOT_MATCHED,
+            return {"jira_key": None, "jira_status": None, "jira_url": None, "outcome": NOT_MATCHED, "planned_end": None,
                     "jira_match": f"Several tickets share this name: {', '.join(hits[:3])}"}
     if key is None:
-        return {"jira_key": None, "jira_status": None, "jira_url": None, "outcome": NOT_MATCHED,
+        return {"jira_key": None, "jira_status": None, "jira_url": None, "outcome": NOT_MATCHED, "planned_end": None,
                 "jira_match": "No ticket with this key or name"}
     iss = issues[key]
     return {"jira_key": key, "jira_status": iss["status"], "jira_url": iss["url"],
-            "outcome": outcomes.get(iss["status"].strip().lower(), NO_OUTCOME), "jira_match": method}
+            "outcome": outcomes.get(iss["status"].strip().lower(), NO_OUTCOME), "jira_match": method,
+            "planned_end": iss.get("planned_end")}

@@ -87,7 +87,8 @@ def _ticks(lo: pd.Timestamp, hi: pd.Timestamp, tz: ZoneInfo) -> tuple[list[str],
 
 
 def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: datetime,
-                   now: datetime, tz: ZoneInfo, colour_by: str = "Status") -> list[tuple[str, alt.Chart]]:
+                   now: datetime, tz: ZoneInfo, colour_by: str = "Status",
+                   show_planned: bool = True) -> list[tuple[str, alt.Chart]]:
     """Return [(section title, chart), ...]; empty if nothing was live in the range."""
     if periods.empty:
         return []
@@ -104,10 +105,12 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
     if "outcome" not in p.columns:
         p["outcome"] = None
     p["outcome"] = p["outcome"].fillna("")
+    if "planned_end" not in p.columns:
+        p["planned_end"] = pd.NaT
     per = p.groupby("activity_id").agg(
         name=("name", "first"), type=("type", "first"), live=("ongoing", "any"),
         first_start=("start", "min"), last_end=("end", "max"), n=("period", "count"),
-        outcome=("outcome", "first"))
+        outcome=("outcome", "first"), planned_end=("planned_end", "first"))
     show_outcome = colour_by == "Outcome" or per["outcome"].isin(["Winner", "Loser", "Inconclusive", "Descoped"]).any()
 
     def _right_text(r):
@@ -115,6 +118,10 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
             "now" if r["live"] else _fmt(r["last_end"], tz, False))
         if show_outcome and r["outcome"] in ("Winner", "Loser", "Inconclusive", "Descoped"):
             text += f"  ·  {r['outcome']}"
+        if show_planned and r["live"] and pd.notna(r["planned_end"]):
+            # Jira end dates are stored as the start of the following day
+            end_day = _fmt(r["planned_end"] - pd.Timedelta(hours=1), tz, False)
+            text += f"  ·  ends {end_day}" if r["planned_end"] > now_ts else f"  ·  planned end {end_day} passed"
         return text
     per["dates"] = per.apply(_right_text, axis=1)
 
@@ -154,9 +161,27 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
         field = "state_key"
         domain, colours = ["Live now", "Ended"], [LIVE_COLOUR, ENDED_COLOUR]
 
-    tick_values, tick_fmt = _ticks(lo, hi, tz)
+    # Stretch the axis so planned end dates of live tests are visible, as long
+    # as the chosen range reaches today (capped at 120 days ahead)
+    hi_disp = hi
+    live_planned = per.loc[per["live"], "planned_end"].dropna()
+    if show_planned and not live_planned.empty and hi >= now_ts - pd.Timedelta(days=1):
+        hi_disp = max(hi, min(live_planned.max(), now_ts + pd.Timedelta(days=120)))
+
+    proj = pd.DataFrame(columns=["activity_id", "name", "planned_end"])
+    if show_planned:
+        proj = per[per["live"] & (per["planned_end"] > now_ts)].reset_index()[["activity_id", "name", "planned_end"]]
+        if not proj.empty:
+            proj["bar_start"] = _iso(now_ts, tz)
+            proj["bar_end"] = _local(proj["planned_end"].clip(upper=hi_disp), tz)
+            proj["ends"] = (proj["planned_end"] - pd.Timedelta(hours=1)).apply(lambda t: _fmt(t, tz, False))
+            proj["days_left"] = ((proj["planned_end"] - now_ts).dt.total_seconds() / 86400).round().astype(int)
+
+    tick_values, tick_fmt = _ticks(lo, hi_disp, tz)
+    live_sec = per[per["live"]].copy()
+    live_sec["_sort"] = live_sec["planned_end"].fillna(pd.Timestamp.max.tz_localize("UTC"))
     sections = [
-        ("Live now", per[per["live"]].sort_values("first_start", ascending=False)),
+        ("Live now", live_sec.sort_values(["_sort", "first_start"], ascending=[True, False])),
         ("Ended", per[~per["live"]].sort_values("last_end", ascending=False)),
     ]
     out = []
@@ -166,14 +191,15 @@ def build_calendar(periods: pd.DataFrame, range_start: datetime, range_end: date
         ids = sec.index.tolist()
         chart = _section_chart(
             p[p["activity_id"].isin(ids)], gaps[gaps["activity_id"].isin(ids)] if not gaps.empty else gaps,
-            sec, ids, lo, hi, now_ts, tz, field, domain, colours, tick_values, tick_fmt,
-            show_legend=(colour_by in ("Type", "Outcome")))
+            sec, ids, lo, hi_disp, now_ts, tz, field, domain, colours, tick_values, tick_fmt,
+            show_legend=(colour_by in ("Type", "Outcome")),
+            proj=proj[proj["activity_id"].isin(ids)] if not proj.empty else proj)
         out.append((f"{title} ({len(ids)})", chart))
     return out
 
 
 def _section_chart(p, gaps, per, order, lo, hi, now_ts, tz, field, domain, colours,
-                   tick_values, tick_fmt, show_legend) -> alt.Chart:
+                   tick_values, tick_fmt, show_legend, proj=None) -> alt.Chart:
     height = ROW_PX * len(order)
     x_scale = alt.Scale(domain=[_iso(lo, tz), _iso(hi, tz)])
     x = alt.X("bar_start:T", title=None, scale=x_scale,
@@ -217,6 +243,20 @@ def _section_chart(p, gaps, per, order, lo, hi, now_ts, tz, field, domain, colou
                      alt.Tooltip("days:Q", title="Days live"), alt.Tooltip("period_label:N", title="Live period"),
                      alt.Tooltip("outcome:N", title="Outcome"),
                      alt.Tooltip("activity_id:N", title="Activity ID")]))
+
+    if proj is not None and not proj.empty:
+        # Planned run from today to the Jira end date: a faint continuation of
+        # the bar with a small mark at the planned end
+        layers.append(
+            alt.Chart(proj).mark_bar(height=BAR_PX, cornerRadius=3, yOffset=BAR_DY, color=LIVE_COLOUR,
+                                     opacity=0.22)
+            .encode(x=x, x2="bar_end:T", y=y,
+                    tooltip=[alt.Tooltip("name:N", title="Test"), alt.Tooltip("ends:N", title="Planned end (Jira)"),
+                             alt.Tooltip("days_left:Q", title="Days to go")]))
+        layers.append(
+            alt.Chart(proj).mark_tick(color=LIVE_COLOUR, thickness=2, size=BAR_PX + 6, yOffset=BAR_DY)
+            .encode(x="bar_end:T", y=y,
+                    tooltip=[alt.Tooltip("name:N", title="Test"), alt.Tooltip("ends:N", title="Planned end (Jira)")]))
 
     names = per.reset_index()
     # Test name, left. Long names are trimmed only where they would run into

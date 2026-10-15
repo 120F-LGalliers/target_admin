@@ -52,3 +52,17 @@ def test_client_pages_and_fetches_named_keys():
     issues = c.fetch(["Test (EAOA-9)", "Other (EAOA-1)"])
     assert set(issues) == {"EAOA-1", "EAOA-2", "EAOA-9"}
     assert issues["EAOA-9"]["url"] == "https://x.atlassian.net/browse/EAOA-9"
+
+
+def test_planned_end_field_and_conversion():
+    import pandas as pd
+    from timeline.store import planned_end_ts
+    c = JiraClient(JiraConfig("x.atlassian.net", "e", "t"))
+    iss = c._simplify({"key": "EAOA-3006", "fields": {"summary": "s", "status": {"name": "Run"},
+                                                      "customfield_12051": "2026-09-30"}})
+    assert iss["planned_end"] == "2026-09-30"
+    m = match_activity("s (EAOA-3006)", {"EAOA-3006": iss}, build_index({"EAOA-3006": iss}), ["EAOA"])
+    assert m["planned_end"] == "2026-09-30"
+    ts = planned_end_ts(pd.Series(["2026-09-30", None]), "Europe/London")
+    # End of 30 Sep UK time (BST) = 23:00 UTC on 30 Sep
+    assert ts.iloc[0] == pd.Timestamp("2026-09-30T23:00:00Z") and pd.isna(ts.iloc[1])

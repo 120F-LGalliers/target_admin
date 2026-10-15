@@ -22,7 +22,19 @@ from .jira_api import build_index, match_activity
 from .lifecycle import derive_lifecycle
 
 
+def planned_end_ts(values: pd.Series, tz) -> pd.Series:
+    """Jira's End date is a plain date ("2026-09-30"). Treat it as the end of
+    that day in UK time, i.e. midnight at the start of the next day."""
+    d = pd.to_datetime(values, errors="coerce")
+    if getattr(d.dt, "tz", None) is not None:
+        return d.dt.tz_convert("UTC")
+    return (d.dt.normalize() + pd.Timedelta(days=1)).dt.tz_localize(tz, nonexistent="shift_forward",
+                                                                     ambiguous="NaT").dt.tz_convert("UTC")
+
+
 class Store:
+    tz = "Europe/London"
+
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.data = {"refreshed_at": None, "activities": {}}
@@ -151,7 +163,7 @@ class Store:
                 row.update(match_activity(lc.name, jira, index, projects))
             else:
                 row.update({"jira_key": None, "jira_status": None, "jira_url": None,
-                            "outcome": None, "jira_match": None})
+                            "outcome": None, "jira_match": None, "planned_end": None})
             rows.append(row)
         df = pd.DataFrame(rows)
         if df.empty:
@@ -159,4 +171,5 @@ class Store:
         for col in ("first_live_at", "last_activated_at", "concluded_at",
                     "scheduled_start", "scheduled_end", "modified_at"):
             df[col] = pd.to_datetime(df[col], utc=True)
+        df["planned_end"] = planned_end_ts(df["planned_end"], self.tz)
         return df

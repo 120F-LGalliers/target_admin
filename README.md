@@ -51,6 +51,8 @@ On each refresh the app also reads TM's Jira and matches every Target activity t
 
 The outcome is the ticket's status: `Winners` -> Winner, `Losers` -> Loser, `Inconclusive`, `Descoped`. Any other status shows as "No outcome yet"; no match shows as "No Jira ticket". Add a `[jira]` section to the secrets to turn this on.
 
+The ticket's **End date** field (`customfield_12051` on EAOA) is shown as "Planned end (Jira)" in the tables, and on the calendar as a faint bar from today to that date for live tests. Set `end_date_field` under `[jira]` if TM ever use a different field.
+
 ## Tests
 
 ```bash

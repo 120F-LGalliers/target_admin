@@ -119,6 +119,10 @@ def build_demo_jira(activities, histories, seed: int = 7) -> dict:
             status = "Run"
         else:
             status = "To Do"
+        now = datetime.now(timezone.utc)
+        planned = (now + timedelta(days=rng.randint(-4, 45))).strftime("%Y-%m-%d") if act["state"] == "approved" \
+            else (now - timedelta(days=rng.randint(5, 90))).strftime("%Y-%m-%d")
         issues[key] = {"key": key, "summary": summary, "status": status, "status_category": None,
+                       "planned_end": planned if rng.random() > 0.15 else None,
                        "url": f"https://example.atlassian.net/browse/{key}"}
     return issues
