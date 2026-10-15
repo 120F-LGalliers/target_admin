@@ -201,7 +201,7 @@ f1, f2, f3, f4 = st.columns([1.3, 1.6, 2, 2])
 preset = f1.selectbox("Period", list(presets), index=0)
 if presets[preset]:
     start_d, end_d = presets[preset]
-    f2.date_input("Dates", value=(start_d, end_d), disabled=True, format="DD/MM/YYYY")
+    f2.date_input("Dates", value=(start_d, end_d), disabled=True, format="DD/MM/YYYY", key=f"dates-{preset}")
 else:
     picked = f2.date_input("Dates", value=(today - timedelta(days=29), today), format="DD/MM/YYYY")
     if isinstance(picked, (list, tuple)) and len(picked) == 2:
@@ -363,9 +363,9 @@ with st.expander("Can't find a test?"):
                 st.error(f"Change log fetch failed: {rec['error']}")
             st.write(f"Change log: {len(hist)} entries")
             if hist:
-                from timeline.lifecycle import _dig
+                from timeline.lifecycle import _dig, _entry_time, entry_state
                 st.dataframe(pd.DataFrame([{
-                    "modifiedAt": _dig(h, "modifiedAt"), "state": _dig(h, "state"),
+                    "time": _entry_time(h), "state change": entry_state(h),
                     "startsAt": _dig(h, "startsAt"), "endsAt": _dig(h, "endsAt"),
                 } for h in hist]), hide_index=True, width="stretch")
                 st.caption("Raw first and last change log entries, to check the field names Target uses:")
