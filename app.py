@@ -298,13 +298,16 @@ tc, t1, t2, t3, t4 = st.tabs([
 with tc:
     colour_by = st.radio("Colour bars by", ["Status", "Type"], horizontal=True, key="cal-colour",
                          help="Status shows what is live now in orange. Type separates A/B, XT and others.")
-    chart = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ, colour_by=colour_by)
-    if chart is None:
+    sections = build_calendar(periods, range_start, range_end, datetime.now(timezone.utc), TZ, colour_by=colour_by)
+    if not sections:
         st.info("No tests were live during this period.")
     else:
-        st.caption("Each bar is a period when the test was live. A dotted line means it was stopped or paused, "
-                   "then relaunched. A dot marks where a test stopped. Hover for exact dates.")
-        st.altair_chart(chart, width="stretch")
+        st.caption("Each bar shows when a test was live. A dotted line means it was stopped or paused, "
+                   "then relaunched. The short dark mark on each row is today. Hover over a bar for exact times.")
+        for title, chart in sections:
+            st.markdown(f"<div style='font-weight:700;color:#1F1813;margin:14px 0 2px'>{title}</div>",
+                        unsafe_allow_html=True)
+            st.altair_chart(chart, width="stretch")
 
     # Tests that have been live but have no usable dates can't be drawn
     placed = set(periods["activity_id"]) if not periods.empty else set()
