@@ -331,7 +331,7 @@ with st.expander("Can't find a test?"):
         hits = [(aid, r) for aid, r in recs.items()
                 if q.strip() == aid or q.lower() in str(r["activity"].get("name", "")).lower()]
         if not hits:
-            seen = sorted({str(r["activity"].get("workspace") or "Default") for r in recs.values()})
+            seen = sorted({str(r["activity"].get("workspace") or "Default Workspace") for r in recs.values()})
             st.error(f"No activity matching \"{q}\" came back from Target ({len(recs)} activities in total, "
                      f"from workspaces: {', '.join(seen) or 'unknown'}). The most likely cause is that the test sits "
                      "in a workspace the API credential can't see. Check its product profile in the Adobe Admin "
@@ -352,7 +352,8 @@ with st.expander("Can't find a test?"):
                 st.write("Not showing in the lists because " + "; ".join(reasons) + ".")
             fmt = lambda t: "" if pd.isna(t) else t.tz_convert(TZ).strftime("%d %b %Y, %H:%M")
             st.write({
-                "Current state in Target": act.get("state"), "Workspace": act.get("workspace"),
+                "Current state in Target": act.get("state"),
+                "Workspace": act.get("workspace") or "Default Workspace (the API leaves this blank for the default)",
                 "Scheduled start": act.get("startsAt"), "Scheduled end": act.get("endsAt"),
                 "Last modified": act.get("modifiedAt"), "Last activated": fmt(row["last_activated_at"]),
                 "First went live": fmt(row["first_live_at"]), "Concluded": fmt(row["concluded_at"]),
@@ -363,10 +364,10 @@ with st.expander("Can't find a test?"):
                 st.error(f"Change log fetch failed: {rec['error']}")
             st.write(f"Change log: {len(hist)} entries")
             if hist:
-                from timeline.lifecycle import _dig, _entry_time, entry_state
+                from timeline.lifecycle import _dig, _entry_time, describe_state_change, unwrap
                 st.dataframe(pd.DataFrame([{
-                    "time": _entry_time(h), "state change": entry_state(h),
-                    "startsAt": _dig(h, "startsAt"), "endsAt": _dig(h, "endsAt"),
+                    "time": _entry_time(h), "state change": describe_state_change(h),
+                    "startsAt": unwrap(_dig(h, "startsAt")), "endsAt": unwrap(_dig(h, "endsAt")),
                 } for h in hist]), hide_index=True, width="stretch")
                 st.caption("Raw first and last change log entries, to check the field names Target uses:")
                 st.json(hist[:1] + (hist[-1:] if len(hist) > 1 else []), expanded=False)
