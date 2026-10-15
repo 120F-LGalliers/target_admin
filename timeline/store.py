@@ -93,10 +93,30 @@ class Store:
         self.save()
         return {"activities": len(activities), "histories_fetched": len(todo), "errors": errors}
 
+    def lifecycles(self, now: datetime | None = None):
+        for rec in self.data.get("activities", {}).values():
+            yield rec, derive_lifecycle(rec["activity"], rec.get("history"), now=now)
+
+    def periods_frame(self, now: datetime | None = None) -> pd.DataFrame:
+        """One row per live period, for the calendar view. A test that was
+        stopped and relaunched has several rows."""
+        rows = []
+        for _, lc in self.lifecycles(now):
+            for i, p in enumerate(lc.periods, start=1):
+                rows.append({
+                    "activity_id": lc.activity_id, "name": lc.name, "type": lc.type,
+                    "status": lc.status, "period": i, "periods": len(lc.periods),
+                    "start": p.start, "end": p.end, "ongoing": p.end is None,
+                })
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["start"] = pd.to_datetime(df["start"], utc=True)
+            df["end"] = pd.to_datetime(df["end"], utc=True)
+        return df
+
     def lifecycle_frame(self, now: datetime | None = None) -> pd.DataFrame:
         rows = []
-        for rec in self.data.get("activities", {}).values():
-            lc = derive_lifecycle(rec["activity"], rec.get("history"), now=now)
+        for rec, lc in self.lifecycles(now):
             if rec.get("error"):
                 lc.notes.append(f"History fetch failed: {rec['error'][:120]}")
             rows.append(lc.as_row())
